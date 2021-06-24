@@ -1,0 +1,57 @@
+#! /bin/bash
+# Script to create a set of sr-iov virtual functions (vf) given (multiple)
+# config files.
+#
+# HOW TO RUN THIS SCRIPT
+# Usually it will be called after reboot is complete, as the sr-iov config is
+# lost during reboot. It will go to {{ conf_path }}, where the config files
+# reside, and then run them in the order they were created.
+#
+# Mauricio Tavares <raubvogel@gmail.com>
+# Version 1.0.1. 20210616
+# - Read and set the MAC address for each vf
+# Version 1.0.0.
+# - Initial version
+#
+# NOTEs:
+# - Config files provide enough info ("parent" device info, number of
+#   vfs to be created, vfs' MAC/VLAN/name/PCI-address) to recreate the
+#   vfs.
+# - filename for the config files follow the format devicename-devicePCI.csv
+#   Ex: ens6f1-0000:a1:00.1.csv
+#   As the name implies, these files follow the comma separated value format.
+#
+data_source="{{ conf_path }}"
+
+# Create the virtual functions
+create-vf()
+{
+   device_name=$1
+   number_functions=$2
+
+   echo 0 > /sys/class/net/$device_name/device/mlx5_num_vfs
+   echo $number_functions > /sys/class/net/$device_name/device/mlx5_num_vfs
+}
+
+populate-vf()
+{
+   conf_file="$data_source/$1.csv"
+   device_name=$2
+   vf_num=0
+
+   while read line; do
+      echo $line
+      IFS=, read vf_mac vf_vlan vf_pci vf_name <<<  $(echo $line)
+      ip link set $device_name vf $vf_num vlan $vf_vlan
+      ip link set dev $vf_name address $vf_mac
+      ((vf_num++))
+   done < "$conf_file"
+}
+
+# Loop over everyone in {{ conf_path }}
+for i in $(ls -Rt $data_source/*.csv | sed 's/.*\///' )
+do
+   i=${i%.*}
+   create-vf ${i%-*} $(wc -l $data_source/"$i".csv | awk '{ print $1 }')
+   populate-vf $i ${i%-*}
+done

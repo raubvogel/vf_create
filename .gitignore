@@ -1,0 +1,7 @@
+# gitignore file for 
+
+# Configuration files with possibly sensitive information
+ansible.cfg
+
+
+#

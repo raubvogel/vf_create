@@ -1,0 +1,95 @@
+---
+# /tasks/main.yml
+#
+# Input
+#   start_vlan
+#   device_address
+#   num_vfs
+#    - num_vfs = 0 : Reset
+
+- ansible.builtin.set_fact:
+    vf_info: []
+    vf_vlan: []
+    conf_path: "/var/tmp/sriov"
+    script_path: "/opt/vf_launcher"
+
+- name: Get the device name from PCI address
+  ansible.builtin.shell:
+    lshw -c network -businfo |grep {{ device_address }} | awk '{ print $2 }'
+  register: device_name
+
+- name: Find out max number of VFs this device is configured to use
+  ansible.builtin.shell:
+    cat /sys/class/net/{{ device_name.stdout }}/device/sriov_totalvfs
+  register: max_vfs
+
+- name: Reset the number of current number of VFs this device is configured to use
+  ansible.builtin.shell:
+    echo 0 >  /sys/class/net/{{ device_name.stdout }}/device/mlx5_num_vfs
+  register: curr_vfs
+  when: num_vfs | default(False)
+
+- name: Change the current number of VFs this device is configured to use
+  ansible.builtin.shell:
+    echo {{ num_vfs }} >  /sys/class/net/{{ device_name.stdout }}/device/mlx5_num_vfs
+  when: num_vfs | int > 0
+
+- name: Get the device names and PCI addresses for the VFs associated with device_address
+  ansible.builtin.shell:
+    lshw -c network -businfo |grep {{ device_name.stdout }}np | cut -d '@' -f2- | awk '{ print $1, $2 }'
+  register: vf_stuff
+  when: num_vfs | int > 0
+
+- name: Get PCI address and device name
+  ansible.builtin.set_fact:
+     vf_info: "{{ vf_info + [ item.split(' ') ]}}"
+  loop: "{{ vf_stuff.stdout_lines }}"
+  when: (vf_stuff|default({})).stdout_lines | default(False)
+
+- name: Associate VLANs with VFs
+  ansible.builtin.set_fact:
+     vf_vlan: "{{ vf_vlan + [ start_vlan | int + vf_index ] }}"
+  loop: "{{ vf_stuff.stdout_lines }}"
+  loop_control:
+    index_var: vf_index
+  when: (vf_stuff|default({})).stdout_lines | default(False)
+
+- name: Set VLANs
+  ansible.builtin.shell:
+    ip link set {{ device_name.stdout }} vf {{ vf_index }} vlan {{ start_vlan | int + vf_index }}
+  loop: "{{ vf_info }}"
+  loop_control:
+    index_var: vf_index
+  when: vf_info | default(False)
+
+- name: Get the MACs
+  ansible.builtin.shell:
+    for i in {0..{{ num_vfs | int -1 }}}; do ip a show dev {{ device_name.stdout }}np0v$i | grep 'link/ether' | awk '{ print $2 }'; done
+  register: mac_list
+  when: vf_info | default(False)
+
+- name: Ensure {{ conf_path }} exists
+  ansible.builtin.file:
+    path: "{{ conf_path }}"
+    state: directory
+
+- name: Delete old config file
+  ansible.builtin.file:
+    path: "{{ conf_path }}/{{ device_name.stdout }}-{{ device_address }}.csv"
+    state: absent
+
+- name: Create config file to recreate and repopulate the VFs
+  ansible.builtin.shell:
+    echo "{{ item.2 }},{{ start_vlan | int + vf_index }},{{ item.0 }},{{ item.1 }}" >> "{{ conf_path }}/{{ device_name.stdout }}-{{ device_address }}.csv"
+  with_together:
+    - "{{ vf_info }}"
+    - "{{ mac_list.stdout_lines }}"
+  loop_control:
+    index_var: vf_index
+  when: (mac_list|default({})).stdout_lines | default(False)
+
+- name: upload script
+  ansible.builtin.template:
+     src: build_vfs.sh.j2
+     dest: "{{ script_path }}/build_vfs.sh"
+     mode: '0744'
